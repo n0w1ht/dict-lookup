@@ -4,7 +4,7 @@
 
 ;; Author: Hormoz Zamanpour Siahkal <n0w1ht@users.noreply.github.com>
 ;; URL: https://github.com/n0w1ht/dict-lookup
-;; Version: 0.4.2
+;; Version: 0.4.3
 ;; Package-Requires: ((emacs "28.1") (quick-sdcv "1.0"))
 ;; Keywords: convenience, wp, i18n
 
@@ -34,9 +34,10 @@
 ;; `dict-lookup-excluded-dictionaries' leaves some out;
 ;; `dict-lookup-list-dictionaries' shows the names they take.
 ;;
-;; In the result buffer, `s' (`dict-lookup-save') saves the entry at point
-;; as a flashcard in `dict-lookup-vocabulary-file', an Org file that
-;; org-drill can drill as it is.  `dict-lookup-export-anki' sends the saved
+;; In the result buffer, `RET' (`dict-lookup-open-entry') looks up the
+;; close match at point on its own, and `s' (`dict-lookup-save') saves
+;; the entry at point as a flashcard in `dict-lookup-vocabulary-file', an
+;; Org file that org-drill can drill as it is.  `dict-lookup-export-anki' sends the saved
 ;; words that Anki doesn't have yet to Anki.
 
 ;;; Code:
@@ -478,8 +479,26 @@ pick the dictionary entry to save.  The card goes to
         (message "Saved %s to %s%s" word (abbreviate-file-name file)
                  (if dict-lookup-save-to-anki " and Anki" ""))))))
 
+(defun dict-lookup-open-entry ()
+  "Look up the word of the result entry at point on its own.
+After a misspelling, the result buffer lists close matches; this
+shows the one at point, keeping the sentence it was looked up from."
+  (interactive)
+  (unless (derived-mode-p 'quick-sdcv-mode)
+    (user-error "Not in a dictionary result buffer"))
+  (let* ((entry (or (dict-lookup--entry-at-point)
+                    (user-error "No entry at point")))
+         (word (plist-get entry :word))
+         (context dict-lookup--context))
+    (let ((dict-lookup-save-context nil))
+      (dict-lookup word))
+    (when-let ((buf (get-buffer (quick-sdcv--get-buffer-name word))))
+      (with-current-buffer buf
+        (setq-local dict-lookup--context context)))))
+
 (with-eval-after-load 'quick-sdcv
-  (define-key quick-sdcv-mode-map (kbd "s") #'dict-lookup-save))
+  (define-key quick-sdcv-mode-map (kbd "s") #'dict-lookup-save)
+  (define-key quick-sdcv-mode-map (kbd "RET") #'dict-lookup-open-entry))
 
 ;;;; Anki
 

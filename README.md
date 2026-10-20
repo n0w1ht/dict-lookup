@@ -67,6 +67,8 @@ phrase and pick it.
 - `C-c D`: look up the word at point (or the selection) straight away.
   It works in text, Org, EPUB (nov), eww, and in pdf-tools when you
   select text with the mouse.
+- After a misspelling, the result buffer lists close matches. Press `RET`
+  on one to look that word up on its own.
 - In the result buffer, `q` closes it.
 
 ## Saving words as flashcards
