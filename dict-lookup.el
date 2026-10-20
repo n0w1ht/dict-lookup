@@ -4,7 +4,7 @@
 
 ;; Author: Hormoz Zamanpour Siahkal <n0w1ht@users.noreply.github.com>
 ;; URL: https://github.com/n0w1ht/dict-lookup
-;; Version: 0.4.0
+;; Version: 0.4.1
 ;; Package-Requires: ((emacs "28.1") (quick-sdcv "1.0"))
 ;; Keywords: convenience, wp, i18n
 
@@ -230,10 +230,11 @@ In a pdf-tools buffer, return the text of the selected region."
 
 (defun dict-lookup--arrange (results)
   "Drop excluded dictionaries from sdcv RESULTS and put ordered ones first."
-  (let* ((kept (seq-remove (lambda (r)
-                             (member (alist-get 'dict r)
-                                     dict-lookup-excluded-dictionaries))
-                           results))
+  (let* ((kept (seq-uniq       ; sdcv repeats some close matches
+                (seq-remove (lambda (r)
+                              (member (alist-get 'dict r)
+                                      dict-lookup-excluded-dictionaries))
+                            results)))
          (rank (lambda (r)
                  (or (seq-position dict-lookup-dictionary-order
                                    (alist-get 'dict r))
@@ -244,36 +245,50 @@ In a pdf-tools buffer, return the text of the selected region."
     (sort kept
           (lambda (a b) (< (funcall rank a) (funcall rank b))))))
 
+(defun dict-lookup--word-argument (word)
+  "Return WORD as a command-line argument for sdcv, and whether it is UTF-8.
+The result is (ARGUMENT . UTF-8-P).  Elsewhere the argument is plain
+UTF-8.  Windows hands programs their arguments in the ANSI code page,
+which has no room for letters such as Hungarian ő and ű; a word that
+fits the code page goes as it is, and any other goes as raw UTF-8
+bytes, which reach sdcv unchanged."
+  (if (and (eq system-type 'windows-nt)
+           (let ((coding (or locale-coding-system 'utf-8)))
+             (not (unencodable-char-position 0 (length word) coding nil word))))
+      (cons word nil)
+    (cons (encode-coding-string word 'utf-8) t)))
+
 (defun dict-lookup--sdcv (word &rest options)
-  "Look WORD up with sdcv, passing OPTIONS, and return its parsed results.
-WORD goes to sdcv on standard input as UTF-8 rather than on the command
-line, because Windows passes command-line arguments in the ANSI code
-page, which has no room for letters such as Hungarian ő and ű."
+  "Look WORD up with sdcv, passing OPTIONS, and return its parsed results."
   (unless (executable-find quick-sdcv-program)
     (user-error "Cannot find sdcv; set `quick-sdcv-program'"))
-  (with-temp-buffer
-    (insert word "\n")
-    (let* ((coding-system-for-read 'utf-8)
-           (coding-system-for-write 'utf-8)
-           (process-environment
-            (seq-remove (lambda (v) (string-prefix-p "SDCV_PAGER=" v))
-                        process-environment))
-           (status (apply #'call-process-region (point-min) (point-max)
-                          quick-sdcv-program t t nil
-                          "--json-output" "--utf8-output" "--utf8-input"
-                          "--only-data-dir" "--data-dir"
-                          (expand-file-name dict-lookup-directory)
-                          (append (when quick-sdcv-exact-search
-                                    '("--exact-search"))
-                                  options))))
-      (unless (eql status 0)
-        (error "sdcv failed: %s" (string-trim (buffer-string))))
-      ;; Reading from standard input, sdcv prints a prompt before the JSON.
-      (goto-char (point-min))
-      (unless (search-forward "[" nil t)
-        (error "Unexpected sdcv output: %s" (string-trim (buffer-string))))
-      (backward-char)
-      (append (json-read) nil))))
+  (pcase-let ((`(,argument . ,utf-8) (dict-lookup--word-argument word)))
+    (with-temp-buffer
+      (let* ((coding-system-for-read 'utf-8)
+             (process-environment
+              (seq-remove (lambda (v) (string-prefix-p "SDCV_PAGER=" v))
+                          process-environment))
+             ;; --non-interactive matters: without it, sdcv asks which
+             ;; of several close matches to show and waits forever.
+             (status (apply #'call-process quick-sdcv-program nil '(t nil) nil
+                            "--non-interactive" "--json-output" "--utf8-output"
+                            "--only-data-dir" "--data-dir"
+                            (expand-file-name dict-lookup-directory)
+                            (append (when utf-8 '("--utf8-input"))
+                                    (when quick-sdcv-exact-search
+                                      '("--exact-search"))
+                                    options
+                                    (list argument)))))
+        (cond
+         ((eql status 2) nil)
+         ((not (eql status 0))
+          (error "sdcv failed with exit code %s" status))
+         (t
+          (goto-char (point-min))
+          (unless (search-forward "[" nil t)
+            (error "Unexpected sdcv output: %s" (string-trim (buffer-string))))
+          (backward-char)
+          (append (json-read) nil)))))))
 
 (defun dict-lookup--call-process (fn &rest args)
   "Run quick-sdcv's lookup FN with ARGS, the dict-lookup way when active."
