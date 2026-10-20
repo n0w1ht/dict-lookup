@@ -4,7 +4,7 @@
 
 ;; Author: Hormoz Zamanpour Siahkal <n0w1ht@users.noreply.github.com>
 ;; URL: https://github.com/n0w1ht/dict-lookup
-;; Version: 0.4.1
+;; Version: 0.4.2
 ;; Package-Requires: ((emacs "28.1") (quick-sdcv "1.0"))
 ;; Keywords: convenience, wp, i18n
 
@@ -262,33 +262,42 @@ bytes, which reach sdcv unchanged."
   "Look WORD up with sdcv, passing OPTIONS, and return its parsed results."
   (unless (executable-find quick-sdcv-program)
     (user-error "Cannot find sdcv; set `quick-sdcv-program'"))
-  (pcase-let ((`(,argument . ,utf-8) (dict-lookup--word-argument word)))
-    (with-temp-buffer
-      (let* ((coding-system-for-read 'utf-8)
-             (process-environment
-              (seq-remove (lambda (v) (string-prefix-p "SDCV_PAGER=" v))
-                          process-environment))
-             ;; --non-interactive matters: without it, sdcv asks which
-             ;; of several close matches to show and waits forever.
-             (status (apply #'call-process quick-sdcv-program nil '(t nil) nil
-                            "--non-interactive" "--json-output" "--utf8-output"
-                            "--only-data-dir" "--data-dir"
-                            (expand-file-name dict-lookup-directory)
-                            (append (when utf-8 '("--utf8-input"))
-                                    (when quick-sdcv-exact-search
-                                      '("--exact-search"))
-                                    options
-                                    (list argument)))))
-        (cond
-         ((eql status 2) nil)
-         ((not (eql status 0))
-          (error "sdcv failed with exit code %s" status))
-         (t
-          (goto-char (point-min))
-          (unless (search-forward "[" nil t)
-            (error "Unexpected sdcv output: %s" (string-trim (buffer-string))))
-          (backward-char)
-          (append (json-read) nil)))))))
+  (pcase-let ((`(,argument . ,utf-8) (dict-lookup--word-argument word))
+              (errors (make-temp-file "dict-lookup-sdcv")))
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((coding-system-for-read 'utf-8)
+                 (process-environment
+                  (seq-remove (lambda (v) (string-prefix-p "SDCV_PAGER=" v))
+                              process-environment))
+                 ;; --non-interactive matters: without it, sdcv asks which
+                 ;; of several close matches to show and waits forever.
+                 (status (apply #'call-process quick-sdcv-program nil
+                                (list t errors) nil
+                                "--non-interactive" "--json-output"
+                                "--utf8-output" "--only-data-dir" "--data-dir"
+                                (expand-file-name dict-lookup-directory)
+                                (append (when utf-8 '("--utf8-input"))
+                                        (when quick-sdcv-exact-search
+                                          '("--exact-search"))
+                                        options
+                                        (list argument)))))
+            (cond
+             ((eql status 2) nil)
+             ((not (eql status 0))
+              (let ((text (with-temp-buffer
+                            (insert-file-contents errors)
+                            (string-trim (buffer-string)))))
+                (error "sdcv failed with exit code %s%s" status
+                       (if (string-empty-p text) "" (concat ": " text)))))
+             (t
+              (goto-char (point-min))
+              (unless (search-forward "[" nil t)
+                (error "Unexpected sdcv output: %s"
+                       (string-trim (buffer-string))))
+              (backward-char)
+              (append (json-read) nil)))))
+      (delete-file errors))))
 
 (defun dict-lookup--call-process (fn &rest args)
   "Run quick-sdcv's lookup FN with ARGS, the dict-lookup way when active."
