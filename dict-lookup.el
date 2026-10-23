@@ -322,7 +322,7 @@ region or the word at point."
                       (dict-lookup--sentence-at-point word)))
         (dict-lookup--active t))
     (quick-sdcv-search-input word)
-    (when-let ((buf (get-buffer (quick-sdcv--get-buffer-name word))))
+    (when-let* ((buf (get-buffer (quick-sdcv--get-buffer-name word))))
       (with-current-buffer buf
         (setq-local dict-lookup--query word)
         (setq-local dict-lookup--context context)))))
@@ -339,7 +339,7 @@ region or the word at point."
 (defun dict-lookup--sentence-at-point (word)
   "Return the sentence at point when it contains WORD, else nil."
   (unless (derived-mode-p 'pdf-view-mode 'minibuffer-mode)
-    (when-let ((sentence (let ((sentence-end-double-space nil))
+    (when-let* ((sentence (let ((sentence-end-double-space nil))
                            (ignore-errors (thing-at-point 'sentence t)))))
       (let ((sentence (string-trim (replace-regexp-in-string
                                     "[ \t\n]+" " " sentence))))
@@ -492,7 +492,7 @@ shows the one at point, keeping the sentence it was looked up from."
          (context dict-lookup--context))
     (let ((dict-lookup-save-context nil))
       (dict-lookup word))
-    (when-let ((buf (get-buffer (quick-sdcv--get-buffer-name word))))
+    (when-let* ((buf (get-buffer (quick-sdcv--get-buffer-name word))))
       (with-current-buffer buf
         (setq-local dict-lookup--context context)))))
 
