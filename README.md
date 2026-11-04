@@ -45,7 +45,9 @@ phrase and pick it.
    `.../.emacs.d/dict/wiktionary-hu-en/` and so on.
    `M-: (locate-user-emacs-file "dict/")` shows the exact folder.
 
-4. Copy `dict-lookup.el` to `.emacs.d/lisp/` and add to your init file:
+4. Copy `dict-lookup.el` to `.emacs.d/lisp/`, with `card-export.el`
+   from [card-export](https://github.com/n0w1ht/card-export), which sends
+   the cards to Anki and org-srs. Then add to your init file:
 
    ```elisp
    (use-package quick-sdcv
@@ -78,14 +80,16 @@ is in. Each word becomes an entry in `vocabulary.org`, in your
 `org-directory`:
 
 ```org
-* ház :drill:
+* ház
 :PROPERTIES:
 :DICT_SOURCE: Hungarian-English Wiktionary dictionary (hu-en)
 :DICT_QUERY: házakban
 :DICT_ADDED: [2026-10-20 Tue]
+:ID:       …
 :END:
+:SRSITEMS:...
 A nagy házakban sokan laknak.
-** Definition
+** Back
 noun
   1. house, building (closed structure with walls and a roof)
   ...
@@ -99,15 +103,24 @@ noun
   entry to save.
 - Saving the same word from the same dictionary twice is refused.
 
-**org-drill:** run `M-x org-drill` in `vocabulary.org`. The word and
-sentence are the question, and the definition is the answer.
+**org-srs:** when [org-srs](https://github.com/bohonghuang/org-srs) is
+installed, each saved word is also an org-srs flashcard (the `:ID:` and
+the folded `:SRSITEMS:` drawer, which holds its review history). Run
+`M-x org-srs-review-start` in `vocabulary.org`. The word and sentence are
+the question, and the definition under `Back` is the answer.
 
 **Anki:** `M-x dict-lookup-export-anki` sends every saved word that Anki
 doesn't have yet to the "Vocabulary" deck as Basic cards, through
 AnkiConnect (the add-on readq already uses). If Anki isn't running, it
 offers to write an import file for File > Import instead. Sent words get
-an `ANKI_EXPORTED` property, so they are never sent twice. To send each
-word to Anki as you save it:
+an `ANKI_EXPORTED` property, so they are never sent twice.
+
+Words sent through AnkiConnect also keep their Anki note id
+(`ANKI_NOTE_ID`). When you edit such a word in `vocabulary.org`, the
+next `M-x dict-lookup-export-anki` updates its note in Anki, keeping the
+tags and review history it has there. If you deleted the note in Anki,
+the word is added again. Words sent through the import file can't be
+updated. To send each word to Anki as you save it:
 
 ```elisp
 (setq dict-lookup-save-to-anki t)

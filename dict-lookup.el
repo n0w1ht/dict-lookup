@@ -4,8 +4,8 @@
 
 ;; Author: Hormoz Zamanpour Siahkal <n0w1ht@users.noreply.github.com>
 ;; URL: https://github.com/n0w1ht/dict-lookup
-;; Version: 0.4.3
-;; Package-Requires: ((emacs "28.1") (quick-sdcv "1.0"))
+;; Version: 0.5.0
+;; Package-Requires: ((emacs "28.1") (quick-sdcv "1.0") (card-export "0.1.0"))
 ;; Keywords: convenience, wp, i18n
 
 ;; This file is not part of GNU Emacs.
@@ -37,16 +37,18 @@
 ;; In the result buffer, `RET' (`dict-lookup-open-entry') looks up the
 ;; close match at point on its own, and `s' (`dict-lookup-save') saves
 ;; the entry at point as a flashcard in `dict-lookup-vocabulary-file', an
-;; Org file that org-drill can drill as it is.  `dict-lookup-export-anki' sends the saved
-;; words that Anki doesn't have yet to Anki.
+;; Org file that org-srs can review as it is (`org-srs-review-start').
+;; `dict-lookup-export-anki' sends the saved words that Anki doesn't have
+;; yet to Anki.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'quick-sdcv)
 (require 'thingatpt)
 (require 'json)
 (require 'org)
-(require 'url)
+(require 'card-export)
 
 (defgroup dict-lookup nil
   "Offline dictionary lookup."
@@ -74,8 +76,8 @@ Names are as in `dict-lookup-dictionary-order'."
   "Org file where `dict-lookup-save' saves words as flashcards."
   :type 'file)
 
-(defcustom dict-lookup-card-tags '("drill")
-  "Tags of each saved word.  org-drill drills entries tagged \"drill\"."
+(defcustom dict-lookup-card-tags nil
+  "Tags of each saved word."
   :type '(repeat string))
 
 (defcustom dict-lookup-save-context t
@@ -87,9 +89,8 @@ It shows on the front of the card, so you recall the word in context."
   "When non-nil, `dict-lookup-save' also sends the word to Anki."
   :type 'boolean)
 
-(defcustom dict-lookup-anki-connect-url "http://127.0.0.1:8765"
-  "Address of Anki's AnkiConnect add-on."
-  :type 'string)
+(define-obsolete-variable-alias 'dict-lookup-anki-connect-url
+  'card-export-anki-connect-url "0.5.0")
 
 (defcustom dict-lookup-anki-deck "Vocabulary"
   "Anki deck receiving saved words."
@@ -383,13 +384,8 @@ Each is a plist (:dict :word :definition :start)."
                 (and (derived-mode-p 'quick-sdcv-mode) dict-lookup--query)))
             (buffer-list)))
 
-(defun dict-lookup--org-text (text)
-  "Return TEXT safe to put in the body of an Org entry."
-  (replace-regexp-in-string "^\\*" " *" text))
-
 (defconst dict-lookup--no-context "What does it mean?"
-  "Body of a card saved without context.
-org-drill skips cards whose body is empty, so they get this line.")
+  "Body of a card saved without context, so its front asks something.")
 
 (defun dict-lookup--card (entry query context)
   "Return the Org entry saving ENTRY, looked up as QUERY in CONTEXT."
@@ -405,9 +401,18 @@ org-drill skips cards whose body is empty, so they get this line.")
             "")
           ":DICT_ADDED: " (format-time-string "[%Y-%m-%d %a]") "\n"
           ":END:\n"
-          (dict-lookup--org-text (or context dict-lookup--no-context)) "\n"
-          "** Definition\n"
-          (dict-lookup--org-text (plist-get entry :definition)) "\n"))
+          (card-export-org-body (or context dict-lookup--no-context)) "\n"
+          "** Back\n"
+          (card-export-org-body (plist-get entry :definition)) "\n"))
+
+(defun dict-lookup--make-srs-card ()
+  "Make the last saved word an org-srs flashcard, when org-srs is installed.
+Its heading and sentence are the front, and Back is the answer."
+  (when (card-export-srs-available-p)
+    (save-excursion
+      (goto-char (point-max))
+      (re-search-backward "^\\* ")
+      (card-export-srs-make-card))))
 
 (defun dict-lookup--saved-p (word dict)
   "Return non-nil when WORD from DICT is in the vocabulary file."
@@ -452,7 +457,8 @@ pick the dictionary entry to save.  The card goes to
                (in-result (dict-lookup--entry-at-point))
                (t (car entries))))
              (word (plist-get entry :word))
-             (file dict-lookup-vocabulary-file))
+             (file dict-lookup-vocabulary-file)
+             (sent nil))
         (when (dict-lookup--saved-p word (plist-get entry :dict))
           (user-error "%s from %s is already saved" word (plist-get entry :dict)))
         (let ((card (dict-lookup--card entry dict-lookup--query
@@ -469,15 +475,22 @@ pick the dictionary entry to save.  The card goes to
                            ((looking-back "\n\n" 2) "")
                            ((bolp) "\n")
                            (t "\n\n"))
-                     card))
-            (let ((save-silently t)) (save-buffer))
-            (when dict-lookup-save-to-anki
+                     card)
+             (dict-lookup--make-srs-card))
+            ;; Anki down: the word goes with the next export instead.
+            (when (and dict-lookup-save-to-anki (card-export-anki-reachable-p))
               (org-with-wide-buffer
                (goto-char (point-max))
                (re-search-backward "^\\* " nil t)
-               (dict-lookup--export-entry-to-anki)))))
+               (setq sent (card-export-anki-org-export
+                           (list (point-marker)) #'dict-lookup--note
+                           (expand-file-name dict-lookup-anki-export-file)))
+               (dict-lookup--report-failed (plist-get sent :failed))))
+            (let ((save-silently t)) (save-buffer))))
         (message "Saved %s to %s%s" word (abbreviate-file-name file)
-                 (if dict-lookup-save-to-anki " and Anki" ""))))))
+                 (cond ((not dict-lookup-save-to-anki) "")
+                       ((eql (plist-get sent :added) 1) " and Anki")
+                       (t " (not to Anki: run M-x dict-lookup-export-anki later)")))))))
 
 (defun dict-lookup-open-entry ()
   "Look up the word of the result entry at point on its own.
@@ -502,46 +515,10 @@ shows the one at point, keeping the sentence it was looked up from."
 
 ;;;; Anki
 
-(defun dict-lookup--anki (action &optional params)
-  "Call the AnkiConnect ACTION with PARAMS (an alist) and return its result."
-  (url-do-setup)
-  (let* ((url-request-method "POST")
-         (url-request-extra-headers '(("Content-Type" . "application/json")))
-         (url-request-data
-          (encode-coding-string
-           (json-encode `((action . ,action) (version . 6)
-                          ,@(and params `((params . ,params)))))
-           'utf-8))
-         ;; Anki runs on this computer, never behind a proxy.
-         (url-proxy-services nil)
-         (buf (url-retrieve-synchronously dict-lookup-anki-connect-url t t 15)))
-    (unless buf
-      (error "No answer from AnkiConnect at %s" dict-lookup-anki-connect-url))
-    (unwind-protect
-        (with-current-buffer buf
-          (goto-char (or (bound-and-true-p url-http-end-of-headers) (point-min)))
-          (let* ((json-object-type 'alist)
-                 (json-array-type 'list)
-                 (json-key-type 'symbol)
-                 (response (json-read-from-string
-                            (decode-coding-string
-                             (buffer-substring-no-properties (point) (point-max))
-                             'utf-8))))
-            (when (cdr (assq 'error response))
-              (error "AnkiConnect: %s" (cdr (assq 'error response))))
-            (cdr (assq 'result response))))
-      (kill-buffer buf))))
-
-(defun dict-lookup--anki-reachable-p ()
-  "Return non-nil when AnkiConnect answers."
-  (condition-case nil (progn (dict-lookup--anki "version") t) (error nil)))
-
 (defun dict-lookup--html (text)
   "Return TEXT as HTML that keeps its line breaks and indentation."
   (concat "<div style=\"text-align:left; white-space:pre-wrap\">"
-          (replace-regexp-in-string
-           ">" "&gt;" (replace-regexp-in-string
-                       "<" "&lt;" (replace-regexp-in-string "&" "&amp;" text)))
+          (card-export-html-escape text)
           "</div>"))
 
 (defun dict-lookup--entry-fields ()
@@ -557,7 +534,9 @@ shows the one at point, keeping the sentence it was looked up from."
                                   (match-beginning 0)
                                 end)))))
          (definition (save-excursion
-                       (if (re-search-forward "^\\*\\* Definition[ \t]*\n" end t)
+                       ;; Cards saved for org-drill call it Definition.
+                       (if (re-search-forward
+                            "^\\*\\* \\(?:Back\\|Definition\\)[ \t]*\n" end t)
                            (string-trim
                             (buffer-substring-no-properties
                              (point) (if (re-search-forward "^\\*+ " end t)
@@ -573,84 +552,50 @@ shows the one at point, keeping the sentence it was looked up from."
                   (dict-lookup--html (or (org-entry-get nil "DICT_SOURCE") ""))
                   "</div>"))))
 
-(defun dict-lookup--export-entry-to-anki ()
-  "Add the saved word at point to Anki and record that on the entry."
+(defun dict-lookup--note ()
+  "Return the Anki note, a card-export plist, for the saved word at point.
+Line breaks in its fields are <br>, so they survive the import file."
   (pcase-let ((`(,model ,front-field ,back-field) dict-lookup-anki-model)
               (`(,front . ,back) (dict-lookup--entry-fields)))
-    (dict-lookup--anki "createDeck" `((deck . ,dict-lookup-anki-deck)))
-    (let ((id (condition-case err
-                  (dict-lookup--anki
-                   "addNote"
-                   `((note . ((deckName . ,dict-lookup-anki-deck)
-                              (modelName . ,model)
-                              (fields . ((,(intern front-field) . ,front)
-                                         (,(intern back-field) . ,back)))
-                              (tags . ,(vconcat dict-lookup-anki-tags))
-                              (options . ((allowDuplicate . :json-false)))))))
-                (error (if (string-match-p "duplicate" (error-message-string err))
-                           "duplicate"
-                         (signal (car err) (cdr err)))))))
-      (org-entry-put nil "ANKI_NOTE_ID" (format "%s" id))
-      (org-entry-put nil "ANKI_EXPORTED" (format-time-string "[%Y-%m-%d %a]")))))
+    (list :deck dict-lookup-anki-deck :model model
+          :fields `((,front-field . ,(replace-regexp-in-string "\n" "<br>" front))
+                    (,back-field . ,(replace-regexp-in-string "\n" "<br>" back)))
+          :tags dict-lookup-anki-tags)))
 
-(defun dict-lookup--tsv-field (string)
-  "Quote STRING as a field of Anki's import file."
-  (concat "\"" (replace-regexp-in-string
-                "\"" "\"\"" (replace-regexp-in-string "[\t\n\r]+" " " string))
-          "\""))
+(defun dict-lookup--saved-words ()
+  "Return markers to the saved words of the vocabulary file (current buffer)."
+  (org-map-entries #'point-marker "LEVEL=1+DICT_SOURCE={.}" 'file))
 
-(defun dict-lookup--export-entry-to-file (file)
-  "Append the saved word at point to the Anki import FILE."
-  (pcase-let ((`(,model . ,_) dict-lookup-anki-model)
-              (`(,front . ,back) (dict-lookup--entry-fields)))
-    (let ((new (not (and (file-exists-p file)
-                         (> (file-attribute-size (file-attributes file)) 0)))))
-      (with-temp-buffer
-        (when new
-          (insert "#separator:Tab\n#html:true\n#notetype column:1\n"
-                  "#deck column:2\n#tags column:5\n"))
-        ;; Fields are one line each, so line breaks become <br> tags.
-        (insert (mapconcat #'dict-lookup--tsv-field
-                           (list model dict-lookup-anki-deck
-                                 (replace-regexp-in-string "\n" "<br>" front)
-                                 (replace-regexp-in-string "\n" "<br>" back)
-                                 (string-join dict-lookup-anki-tags " "))
-                           "\t")
-                "\n")
-        (make-directory (file-name-directory file) t)
-        (let ((coding-system-for-write 'utf-8-unix))
-          (write-region (point-min) (point-max) file (not new) 'silent))))
-    (org-entry-put nil "ANKI_EXPORTED" (format-time-string "[%Y-%m-%d %a]"))))
+(defun dict-lookup--report-failed (failed)
+  "Warn about the words Anki refused: FAILED is a list of (WORD . MESSAGE)."
+  (when failed
+    (display-warning 'dict-lookup
+                     (concat "Some words could not be sent to Anki:\n"
+                             (mapconcat (lambda (f) (format "- %s: %s" (car f) (cdr f)))
+                                        failed "\n")))))
 
 ;;;###autoload
 (defun dict-lookup-export-anki ()
   "Send the saved words that Anki doesn't have yet to Anki.
-Uses the AnkiConnect add-on when Anki is running; otherwise offers to
-write `dict-lookup-anki-export-file' for Anki's File > Import."
+Uses the AnkiConnect add-on when Anki is running; then the words you
+edited since sending them are updated in Anki too.  Otherwise offers
+to write `dict-lookup-anki-export-file' for Anki's File > Import."
   (interactive)
   (let* ((file (expand-file-name dict-lookup-anki-export-file))
-         (method (cond ((dict-lookup--anki-reachable-p) 'anki)
-                       ((y-or-n-p "Cannot reach Anki (is it running, with \
-AnkiConnect?).  Write an import file instead? ")
-                        'file)
-                       (t (user-error "Nothing exported"))))
-         (count 0))
-    (with-current-buffer (find-file-noselect dict-lookup-vocabulary-file)
-      (org-with-wide-buffer
-       (org-map-entries
-        (lambda ()
-          (unless (org-entry-get nil "ANKI_EXPORTED")
-            (if (eq method 'anki)
-                (dict-lookup--export-entry-to-anki)
-              (dict-lookup--export-entry-to-file file))
-            (setq count (1+ count))))
-        "LEVEL=1+DICT_SOURCE={.}" 'file))
-      (let ((save-silently t)) (save-buffer)))
-    (message (if (eq method 'anki)
-                 "Sent %d word%s to Anki"
-               (concat "Wrote %d word%s to " (abbreviate-file-name file)
-                       "; import it in Anki with File > Import"))
-             count (if (= count 1) "" "s"))))
+         (result (with-current-buffer (find-file-noselect dict-lookup-vocabulary-file)
+                   (prog1 (org-with-wide-buffer
+                           (card-export-anki-org-export (dict-lookup--saved-words)
+                                                        #'dict-lookup--note file))
+                     (let ((save-silently t)) (save-buffer)))))
+         (added (plist-get result :added))
+         (updated (plist-get result :updated)))
+    (dict-lookup--report-failed (plist-get result :failed))
+    (pcase (plist-get result :method)
+      ('file (message "Wrote %d word%s to %s; import it in Anki with File > Import"
+                      added (if (= added 1) "" "s") (abbreviate-file-name file)))
+      ('anki (message "Sent %d new word%s to Anki%s" added (if (= added 1) "" "s")
+                      (if (> updated 0) (format ", updated %d" updated) "")))
+      (_ (message "Nothing sent to Anki")))))
 
 (provide 'dict-lookup)
 ;;; dict-lookup.el ends here
