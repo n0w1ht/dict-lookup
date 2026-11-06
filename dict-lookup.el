@@ -44,6 +44,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'char-fold)
 (require 'quick-sdcv)
 (require 'thingatpt)
 (require 'json)
@@ -69,6 +70,12 @@ for example \"WordNet 3.0\" or \"Webster's 1913 (GCIDE)\"."
   "Dictionary names to leave out of results and of completion.
 Names are as in `dict-lookup-dictionary-order'."
   :type '(repeat string))
+
+(defcustom dict-lookup-fold-diacritics t
+  "When non-nil, plain letters in `dict-lookup' completion match accented ones.
+Typing \"o\" then also finds ó, ö and ő, so \"szolo\" finds \"szőlő\".
+An accented letter still matches only itself."
+  :type 'boolean)
 
 (defcustom dict-lookup-vocabulary-file
   (expand-file-name "vocabulary.org"
@@ -206,22 +213,80 @@ In a pdf-tools buffer, return the text of the selected region."
                   (region-beginning) (region-end))))
    (t (thing-at-point 'word t))))
 
+(defun dict-lookup--fold-highlight (regexp candidate)
+  "Return CANDIDATE with the first match of REGEXP highlighted."
+  (if (string-match regexp candidate)
+      (let ((candidate (copy-sequence candidate)))
+        (add-face-text-property (match-beginning 0) (match-end 0)
+                                'completions-common-part nil candidate)
+        candidate)
+    candidate))
+
+(defun dict-lookup--fold-all-completions (string table pred _point)
+  "Return the candidates of TABLE and PRED containing STRING, accents folded.
+This is the `all-completions' function of the `dict-lookup-fold' style."
+  (let* ((regexp (char-fold-to-regexp string))
+         (case-fold-search completion-ignore-case)
+         (matches (let ((completion-regexp-list (list regexp)))
+                    (all-completions "" table pred))))
+    (when matches
+      (if (bound-and-true-p completion-lazy-hilit)
+          (setq completion-lazy-hilit-fn
+                (lambda (c) (dict-lookup--fold-highlight regexp c)))
+        (setq matches (mapcar (lambda (c) (dict-lookup--fold-highlight regexp c))
+                              matches)))
+      (nconc matches 0))))
+
+(defun dict-lookup--fold-try-completion (string table pred point)
+  "Return the `try-completion' result of the `dict-lookup-fold' style.
+STRING is left as it is, since its matches needn't share a prefix.
+TABLE, PRED and POINT are as in `completion-try-completion'."
+  (let ((matches (dict-lookup--fold-all-completions string table pred point)))
+    (cond ((null matches) nil)
+          ((and (null (cdr matches)) (string= (car matches) string)) t)
+          (t (cons string point)))))
+
+(add-to-list 'completion-styles-alist
+             '(dict-lookup-fold
+               dict-lookup--fold-try-completion dict-lookup--fold-all-completions
+               "Substring completion where plain letters match accented ones."))
+
+(defvar orderless-matching-styles)
+
+(defmacro dict-lookup--with-folding (&rest body)
+  "Run BODY with completion folding diacritics, per `dict-lookup-fold-diacritics'.
+With orderless, each component also matches with its accents folded;
+with other styles, the `dict-lookup-fold' style is tried first."
+  (declare (indent 0))
+  `(if (not dict-lookup-fold-diacritics)
+       (progn ,@body)
+     (let ((orderless-matching-styles
+            (if (boundp 'orderless-matching-styles)
+                (append orderless-matching-styles '(char-fold-to-regexp))
+              '(orderless-literal orderless-regexp char-fold-to-regexp)))
+           (completion-styles
+            (if (memq 'orderless completion-styles)
+                completion-styles
+              (cons 'dict-lookup-fold completion-styles))))
+       ,@body)))
+
 (defun dict-lookup--read-word ()
   "Read a headword, offering every dictionary entry for completion."
   (let ((default (dict-lookup--word-at-point))
         (words (dict-lookup-headwords))
         (prompt "Look up: "))
-    (if (fboundp 'consult--read)
-        (consult--read words
-                       :prompt prompt
-                       :default default
-                       :initial default
-                       :history 'dict-lookup-history
-                       :require-match nil
-                       :sort nil
-                       :category 'dict-word)
-      (completing-read prompt words nil nil default
-                       'dict-lookup-history default))))
+    (dict-lookup--with-folding
+     (if (fboundp 'consult--read)
+         (consult--read words
+                        :prompt prompt
+                        :default default
+                        :initial default
+                        :history 'dict-lookup-history
+                        :require-match nil
+                        :sort nil
+                        :category 'dict-word)
+       (completing-read prompt words nil nil default
+                        'dict-lookup-history default)))))
 
 ;; Older versions advised `quick-sdcv--call-process' with these.
 (advice-remove 'quick-sdcv--call-process 'dict-lookup--call-utf-8)
