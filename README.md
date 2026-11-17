@@ -72,6 +72,11 @@ phrase and pick it.
   click selects one word).
 - After a misspelling, the result buffer lists close matches. Press `RET`
   on one to look that word up on its own.
+- In the result buffer, `p` says the word aloud with
+  [kokoro.el](https://github.com/n0w1ht/kokoro.el), and `C-u p` reads its
+  definition too. `M-x dict-lookup-pronounce` also works on the word at
+  point or the selection anywhere. To use another voice, set
+  `dict-lookup-speak-function` to a function that takes the text.
 - In the result buffer, `q` closes it.
 
 ## Saving words as flashcards
@@ -85,11 +90,13 @@ is in. Each word becomes an entry in `vocabulary.org`, in your
 :PROPERTIES:
 :DICT_SOURCE: Hungarian-English Wiktionary dictionary (hu-en)
 :DICT_QUERY: házakban
+:DICT_FROM: hungarian-reader, p. 12
 :DICT_ADDED: [2026-10-20 Tue]
 :ID:       …
 :END:
 :SRSITEMS:...
 A nagy házakban sokan laknak.
+— hungarian-reader, p. 12
 ** Back
 noun
   1. house, building (closed structure with walls and a roof)
@@ -98,7 +105,12 @@ noun
 
 - The sentence you looked the word up from is saved under it, so the
   card shows the word in context. Without a sentence, the card says
-  "What does it mean?".
+  "What does it mean?". This works in PDFs too (pdf-canvas and
+  pdf-tools): the sentence around your selection is taken from the page,
+  with words split over two lines by a hyphen joined again.
+- Where you looked it up is saved under the sentence and in
+  `DICT_FROM`: the PDF's file name and page, the EPUB's title, the web
+  page's title, or the file name.
 - `M-x dict-lookup-save` works from anywhere: it saves the first entry of
   your last lookup, and with `C-u` it lets you pick which dictionary's
   entry to save.
@@ -129,7 +141,8 @@ updated. To send each word to Anki as you save it:
 
 Other settings: `dict-lookup-vocabulary-file`, `dict-lookup-anki-deck`,
 `dict-lookup-anki-model` (if your note type isn't "Basic" with Front and
-Back), `dict-lookup-card-tags` and `dict-lookup-save-context`.
+Back), `dict-lookup-card-tags`, `dict-lookup-save-context` and
+`dict-lookup-save-source`.
 
 ## Choosing which dictionary comes first
 
