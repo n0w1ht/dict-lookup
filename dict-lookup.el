@@ -4,7 +4,7 @@
 
 ;; Author: Hormoz Zamanpour Siahkal <n0w1ht@users.noreply.github.com>
 ;; URL: https://github.com/n0w1ht/dict-lookup
-;; Version: 0.5.0
+;; Version: 0.6.0
 ;; Package-Requires: ((emacs "28.1") (quick-sdcv "1.0") (card-export "0.1.0"))
 ;; Keywords: convenience, wp, i18n
 
@@ -29,7 +29,8 @@
 ;; using sdcv through quick-sdcv.  `dict-lookup' offers every headword of
 ;; every dictionary for completion (through consult when it is installed),
 ;; so multi-word entries such as "heart attack" are easy to find.
-;; `dict-lookup-at-point' looks up the region or the word at point at once.
+;; `dict-lookup-at-point' looks up the region or the word at point at once;
+;; in pdf-tools and pdf-canvas buffers it takes the selected text.
 ;; `dict-lookup-dictionary-order' puts chosen dictionaries first, and
 ;; `dict-lookup-excluded-dictionaries' leaves some out;
 ;; `dict-lookup-list-dictionaries' shows the names they take.
@@ -37,7 +38,9 @@
 ;; In the result buffer, `RET' (`dict-lookup-open-entry') looks up the
 ;; close match at point on its own, and `s' (`dict-lookup-save') saves
 ;; the entry at point as a flashcard in `dict-lookup-vocabulary-file', an
-;; Org file that org-srs can review as it is (`org-srs-review-start').
+;; Org file that org-srs can review as it is (`org-srs-review-start'),
+;; with the sentence it came from (PDFs too) and the book and page; `p'
+;; (`dict-lookup-pronounce') says the word aloud with kokoro.el.
 ;; `dict-lookup-export-anki' sends the saved words that Anki doesn't have
 ;; yet to Anki.
 
@@ -92,6 +95,18 @@ An accented letter still matches only itself."
 It shows on the front of the card, so you recall the word in context."
   :type 'boolean)
 
+(defcustom dict-lookup-save-source t
+  "When non-nil, save where the word was looked up with its card.
+That is the book or file and, in a PDF, the page, such as
+\"guyton-physiology, p. 112\".  It shows under the sentence on the
+front of the card and in the DICT_FROM property."
+  :type 'boolean)
+
+(defcustom dict-lookup-speak-function #'dict-lookup-speak-kokoro
+  "Function that reads a string aloud, for `dict-lookup-pronounce'.
+It is called with the string.  The default uses kokoro.el."
+  :type 'function)
+
 (defcustom dict-lookup-save-to-anki nil
   "When non-nil, `dict-lookup-save' also sends the word to Anki."
   :type 'boolean)
@@ -121,6 +136,9 @@ Import it in Anki with File > Import, then delete it."
 
 (defvar-local dict-lookup--context nil
   "The sentence the word of this result buffer was looked up from.")
+
+(defvar-local dict-lookup--source nil
+  "Where the word of this result buffer was looked up, such as a book and page.")
 
 (defvar dict-lookup--cache nil
   "Cons of (STAMP . HEADWORDS) for `dict-lookup-directory'.")
@@ -201,13 +219,143 @@ Import it in Anki with File > Import, then delete it."
 (declare-function pdf-view-active-region-p "pdf-view")
 (declare-function pdf-view-active-region-text "pdf-view")
 
+(declare-function pdf-canvas-selections "pdf-canvas")
+
+(defun dict-lookup--pdf-canvas-text ()
+  "Return the text selected in a pdf-canvas buffer, or nil.
+Several selections are joined with spaces; areas selected as figures
+\(with \`M-drag') are left out."
+  (when-let* (((fboundp 'pdf-canvas-selections))
+              (texts (delq nil
+                           (mapcar (lambda (selection)
+                                     (unless (plist-get selection :figure)
+                                       (plist-get selection :text)))
+                                   (ignore-errors (pdf-canvas-selections)))))
+              (text (string-trim (replace-regexp-in-string
+                                  "[ \t\n]+" " "
+                                  (mapconcat #'identity texts " ")))))
+    (unless (string-empty-p text) text)))
+
+(declare-function pdf-view-active-region "pdf-view")
+(declare-function pdf-view-current-page "pdf-view")
+(declare-function pdf-info-gettext "pdf-info")
+(declare-function pdf-canvas--text-in "ext:pdf-canvas-module")
+(defvar pdf-canvas--doc)
+(defvar nov-metadata)
+(defvar nov-file-name)
+(defvar eww-data)
+
+(defun dict-lookup--pdf-band (edges)
+  "Return EDGES (LEFT TOP RIGHT BOTTOM), widened to whole lines around it.
+The result reaches a few lines above and below, across the page, so it
+holds the sentence the selection is in."
+  (list 0.0 (max 0.0 (- (float (nth 1 edges)) 0.08))
+        1.0 (min 1.0 (+ (float (nth 3 edges)) 0.08))))
+
+(defun dict-lookup--pdf-canvas-around ()
+  "Return (TEXT . PAGE) around the first text selection in pdf-canvas.
+TEXT is the text of a few lines around it; PAGE counts from 1."
+  (when-let* (((fboundp 'pdf-canvas-selections))
+              (selection (seq-find (lambda (s) (not (plist-get s :figure)))
+                                   (ignore-errors (pdf-canvas-selections))))
+              (page (plist-get selection :page)))
+    (cons (ignore-errors
+            (apply #'pdf-canvas--text-in pdf-canvas--doc (1- page)
+                   (dict-lookup--pdf-band (plist-get selection :edges))))
+          page)))
+
+(defun dict-lookup--pdf-tools-around ()
+  "Return (TEXT . PAGE) around the active region in pdf-tools."
+  (when-let* (((pdf-view-active-region-p))
+              (regions (ignore-errors (pdf-view-active-region)))
+              (first (car regions))
+              ((numberp (car-safe first)))
+              (page (pdf-view-current-page)))
+    (cons (ignore-errors
+            (pdf-info-gettext page
+                              (dict-lookup--pdf-band
+                               (list 0 (nth 1 first) 1
+                                     (nth 3 (car (last regions)))))))
+          page)))
+
+(defun dict-lookup--sentence-in (text word)
+  "Return the sentence of TEXT that holds WORD, or nil.
+Words split over two lines with a hyphen are joined first."
+  (when (and (stringp text) (not (string-empty-p word)))
+    (let* ((case-fold-search t)
+           (text (replace-regexp-in-string
+                  "[ \t\n\r]+" " "
+                  (replace-regexp-in-string
+                   "\\([[:alpha:]]\\)-[ \t]*\n[ \t]*\\([[:lower:]]\\)" "\\1\\2" text)))
+           (word-re (replace-regexp-in-string
+                     " " "[ \t\n]+" (regexp-quote (string-trim word)))))
+      (when (string-match word-re text)
+        (let* ((wbeg (match-beginning 0))
+               (wend (match-end 0))
+               (beg (save-match-data
+                      (let ((pos 0) (last 0))
+                        (while (and (string-match "[.!?][])\"'”’]*\\(?: \\|$\\)"
+                                                  text pos)
+                                    (<= (match-end 0) wbeg))
+                          (setq last (match-end 0) pos (match-end 0)))
+                        last)))
+               (end (if (string-match "[.!?][])\"'”’]*\\(?: \\|$\\)" text wend)
+                        (match-end 0)
+                      (length text)))
+               (sentence (string-trim (substring text beg end))))
+          (when (> (length sentence) 400)
+            ;; Probably not a sentence at all (a table or a caption run
+            ;; together): keep the words around WORD.
+            (let ((from (max 0 (- wbeg beg 150)))
+                  (to (min (length sentence) (+ (- wend beg) 150))))
+              (setq sentence (concat (if (> from 0) "…" "")
+                                     (string-trim (substring sentence from to))
+                                     (if (< to (length sentence)) "…" "")))))
+          (and (< (length word) (length sentence)) sentence))))))
+
+(defun dict-lookup--book-name ()
+  "Return the name of the book or file of the current buffer, or nil."
+  (cond
+   ((and (derived-mode-p 'nov-mode) (boundp 'nov-metadata))
+    (or (alist-get 'title nov-metadata)
+        (and (bound-and-true-p nov-file-name) (file-name-base nov-file-name))))
+   ((and (derived-mode-p 'eww-mode) (boundp 'eww-data))
+    (let ((title (plist-get eww-data :title)))
+      (if (and title (not (string-empty-p title))) title (plist-get eww-data :url))))
+   ((buffer-file-name) (file-name-base (buffer-file-name)))))
+
+(defun dict-lookup--source (&optional page)
+  "Return where the current buffer is, such as \"book, p. 12\", or nil.
+PAGE is the page in a PDF, counting from 1."
+  (when-let* ((book (dict-lookup--book-name)))
+    (if page (format "%s, p. %d" book page) book)))
+
+(defun dict-lookup--context-at-point (word)
+  "Return (SENTENCE . SOURCE) for WORD looked up in the current buffer.
+Either can be nil: SENTENCE is the sentence WORD came from, SOURCE
+says where (see `dict-lookup--source')."
+  (let ((around (cond ((derived-mode-p 'pdf-canvas-mode)
+                       (dict-lookup--pdf-canvas-around))
+                      ((derived-mode-p 'pdf-view-mode)
+                       (dict-lookup--pdf-tools-around)))))
+    (cons (if (derived-mode-p 'pdf-canvas-mode 'pdf-view-mode)
+              (dict-lookup--sentence-in (car around) word)
+            (dict-lookup--sentence-at-point word))
+          (and (not (derived-mode-p 'minibuffer-mode))
+               (dict-lookup--source
+                (or (cdr around)
+                    (and (derived-mode-p 'pdf-view-mode)
+                         (pdf-view-current-page))))))))
+
 (defun dict-lookup--word-at-point ()
   "Return the active region or the word at point, or nil.
-In a pdf-tools buffer, return the text of the selected region."
+In a pdf-tools or pdf-canvas buffer, return the selected text (in
+pdf-canvas a double click selects a word)."
   (cond
    ((and (derived-mode-p 'pdf-view-mode) (pdf-view-active-region-p))
     (string-trim (mapconcat #'identity (pdf-view-active-region-text) " ")))
    ((derived-mode-p 'pdf-view-mode) nil)
+   ((derived-mode-p 'pdf-canvas-mode) (dict-lookup--pdf-canvas-text))
    ((use-region-p)
     (string-trim (buffer-substring-no-properties
                   (region-beginning) (region-end))))
@@ -384,14 +532,17 @@ region or the word at point."
   (interactive (list (dict-lookup--read-word)))
   (when (string-empty-p (string-trim word))
     (user-error "No word given"))
-  (let ((context (and dict-lookup-save-context
-                      (dict-lookup--sentence-at-point word)))
+  (let ((context (and (or dict-lookup-save-context dict-lookup-save-source)
+                      (dict-lookup--context-at-point word)))
         (dict-lookup--active t))
     (quick-sdcv-search-input word)
     (when-let* ((buf (get-buffer (quick-sdcv--get-buffer-name word))))
       (with-current-buffer buf
         (setq-local dict-lookup--query word)
-        (setq-local dict-lookup--context context)))))
+        (setq-local dict-lookup--context
+                    (and dict-lookup-save-context (car context)))
+        (setq-local dict-lookup--source
+                    (and dict-lookup-save-source (cdr context)))))))
 
 ;;;###autoload
 (defun dict-lookup-at-point ()
@@ -404,7 +555,7 @@ region or the word at point."
 
 (defun dict-lookup--sentence-at-point (word)
   "Return the sentence at point when it contains WORD, else nil."
-  (unless (derived-mode-p 'pdf-view-mode 'minibuffer-mode)
+  (unless (derived-mode-p 'pdf-view-mode 'pdf-canvas-mode 'minibuffer-mode)
     (when-let* ((sentence (let ((sentence-end-double-space nil))
                            (ignore-errors (thing-at-point 'sentence t)))))
       (let ((sentence (string-trim (replace-regexp-in-string
@@ -452,8 +603,9 @@ Each is a plist (:dict :word :definition :start)."
 (defconst dict-lookup--no-context "What does it mean?"
   "Body of a card saved without context, so its front asks something.")
 
-(defun dict-lookup--card (entry query context)
-  "Return the Org entry saving ENTRY, looked up as QUERY in CONTEXT."
+(defun dict-lookup--card (entry query context &optional source)
+  "Return the Org entry saving ENTRY, looked up as QUERY in CONTEXT.
+SOURCE says where, such as a book and page."
   (concat "* " (plist-get entry :word)
           (if dict-lookup-card-tags
               (concat " :" (string-join dict-lookup-card-tags ":") ":")
@@ -464,9 +616,11 @@ Each is a plist (:dict :word :definition :start)."
                                        (downcase (plist-get entry :word)))))
               (concat ":DICT_QUERY: " query "\n")
             "")
+          (if source (concat ":DICT_FROM: " source "\n") "")
           ":DICT_ADDED: " (format-time-string "[%Y-%m-%d %a]") "\n"
           ":END:\n"
           (card-export-org-body (or context dict-lookup--no-context)) "\n"
+          (if source (concat "— " (card-export-org-body source) "\n") "")
           "** Back\n"
           (card-export-org-body (plist-get entry :definition)) "\n"))
 
@@ -527,7 +681,8 @@ pick the dictionary entry to save.  The card goes to
         (when (dict-lookup--saved-p word (plist-get entry :dict))
           (user-error "%s from %s is already saved" word (plist-get entry :dict)))
         (let ((card (dict-lookup--card entry dict-lookup--query
-                                       dict-lookup--context)))
+                                       dict-lookup--context
+                                       dict-lookup--source)))
           (with-current-buffer (find-file-noselect file)
             (org-with-wide-buffer
              (when (= (buffer-size) 0)
@@ -567,16 +722,59 @@ shows the one at point, keeping the sentence it was looked up from."
   (let* ((entry (or (dict-lookup--entry-at-point)
                     (user-error "No entry at point")))
          (word (plist-get entry :word))
-         (context dict-lookup--context))
-    (let ((dict-lookup-save-context nil))
+         (context dict-lookup--context)
+         (source dict-lookup--source))
+    (let ((dict-lookup-save-context nil)
+          (dict-lookup-save-source nil))
       (dict-lookup word))
     (when-let* ((buf (get-buffer (quick-sdcv--get-buffer-name word))))
       (with-current-buffer buf
-        (setq-local dict-lookup--context context)))))
+        (setq-local dict-lookup--context context)
+        (setq-local dict-lookup--source source)))))
+
+;;;; Pronunciation
+
+(declare-function kokoro-read-string "kokoro" (string &optional display))
+
+(defun dict-lookup-speak-kokoro (string)
+  "Read STRING aloud with kokoro.el."
+  (unless (require 'kokoro nil t)
+    (user-error "Pronouncing needs kokoro.el (or set `dict-lookup-speak-function')"))
+  (kokoro-read-string string))
+
+(defun dict-lookup--spoken-definition (definition)
+  "Return DEFINITION cleaned for reading aloud.
+Phonetic spellings, bracketed notes and markup are left out."
+  (let ((text definition))
+    (dolist (re '("<[^>]+>" "^/[^/\n]*/$" "\\[[^]\n]*\\]" "^<<[^>]*>>$"))
+      (setq text (replace-regexp-in-string re "" text)))
+    (string-trim (replace-regexp-in-string "[ \t\n]+" " " text))))
+
+;;;###autoload
+(defun dict-lookup-pronounce (&optional definition)
+  "Say the word of the entry at point aloud.
+Outside a result buffer, say the selected word or the word at point.
+With prefix argument DEFINITION, read the entry's definition aloud
+too.  Uses `dict-lookup-speak-function' (kokoro.el by default)."
+  (interactive "P")
+  (let* ((entry (and (derived-mode-p 'quick-sdcv-mode)
+                     (dict-lookup--entry-at-point)))
+         (word (if (derived-mode-p 'quick-sdcv-mode)
+                   (or (plist-get entry :word) dict-lookup--query)
+                 (dict-lookup--word-at-point))))
+    (unless word
+      (user-error "No word to say"))
+    (funcall dict-lookup-speak-function
+             (if (and definition entry)
+                 (concat word ". "
+                         (dict-lookup--spoken-definition
+                          (plist-get entry :definition)))
+               word))))
 
 (with-eval-after-load 'quick-sdcv
   (define-key quick-sdcv-mode-map (kbd "s") #'dict-lookup-save)
-  (define-key quick-sdcv-mode-map (kbd "RET") #'dict-lookup-open-entry))
+  (define-key quick-sdcv-mode-map (kbd "RET") #'dict-lookup-open-entry)
+  (define-key quick-sdcv-mode-map (kbd "p") #'dict-lookup-pronounce))
 
 ;;;; Anki
 
