@@ -67,8 +67,9 @@ phrase and pick it.
   point or the selected text. You can also type a word that isn't in the
   list and press `RET`; sdcv then shows its closest matches.
 - `C-c D`: look up the word at point (or the selection) straight away.
-  It works in text, Org, EPUB (nov), eww, and in pdf-tools when you
-  select text with the mouse.
+  It works in text, Org, EPUB (nov), eww, and in pdf-tools and
+  pdf-canvas when you select text with the mouse (in pdf-canvas a double
+  click selects one word).
 - After a misspelling, the result buffer lists close matches. Press `RET`
   on one to look that word up on its own.
 - In the result buffer, `q` closes it.

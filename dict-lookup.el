@@ -4,7 +4,7 @@
 
 ;; Author: Hormoz Zamanpour Siahkal <n0w1ht@users.noreply.github.com>
 ;; URL: https://github.com/n0w1ht/dict-lookup
-;; Version: 0.5.0
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "28.1") (quick-sdcv "1.0") (card-export "0.1.0"))
 ;; Keywords: convenience, wp, i18n
 
@@ -29,7 +29,8 @@
 ;; using sdcv through quick-sdcv.  `dict-lookup' offers every headword of
 ;; every dictionary for completion (through consult when it is installed),
 ;; so multi-word entries such as "heart attack" are easy to find.
-;; `dict-lookup-at-point' looks up the region or the word at point at once.
+;; `dict-lookup-at-point' looks up the region or the word at point at once;
+;; in pdf-tools and pdf-canvas buffers it takes the selected text.
 ;; `dict-lookup-dictionary-order' puts chosen dictionaries first, and
 ;; `dict-lookup-excluded-dictionaries' leaves some out;
 ;; `dict-lookup-list-dictionaries' shows the names they take.
@@ -201,13 +202,32 @@ Import it in Anki with File > Import, then delete it."
 (declare-function pdf-view-active-region-p "pdf-view")
 (declare-function pdf-view-active-region-text "pdf-view")
 
+(declare-function pdf-canvas-selections "pdf-canvas")
+
+(defun dict-lookup--pdf-canvas-text ()
+  "Return the text selected in a pdf-canvas buffer, or nil.
+Several selections are joined with spaces; areas selected as figures
+\(with \`M-drag') are left out."
+  (when-let* (((fboundp 'pdf-canvas-selections))
+              (texts (delq nil
+                           (mapcar (lambda (selection)
+                                     (unless (plist-get selection :figure)
+                                       (plist-get selection :text)))
+                                   (ignore-errors (pdf-canvas-selections)))))
+              (text (string-trim (replace-regexp-in-string
+                                  "[ \t\n]+" " "
+                                  (mapconcat #'identity texts " ")))))
+    (unless (string-empty-p text) text)))
+
 (defun dict-lookup--word-at-point ()
   "Return the active region or the word at point, or nil.
-In a pdf-tools buffer, return the text of the selected region."
+In a pdf-tools or pdf-canvas buffer, return the selected text (in
+pdf-canvas a double click selects a word)."
   (cond
    ((and (derived-mode-p 'pdf-view-mode) (pdf-view-active-region-p))
     (string-trim (mapconcat #'identity (pdf-view-active-region-text) " ")))
    ((derived-mode-p 'pdf-view-mode) nil)
+   ((derived-mode-p 'pdf-canvas-mode) (dict-lookup--pdf-canvas-text))
    ((use-region-p)
     (string-trim (buffer-substring-no-properties
                   (region-beginning) (region-end))))
@@ -404,7 +424,7 @@ region or the word at point."
 
 (defun dict-lookup--sentence-at-point (word)
   "Return the sentence at point when it contains WORD, else nil."
-  (unless (derived-mode-p 'pdf-view-mode 'minibuffer-mode)
+  (unless (derived-mode-p 'pdf-view-mode 'pdf-canvas-mode 'minibuffer-mode)
     (when-let* ((sentence (let ((sentence-end-double-space nil))
                            (ignore-errors (thing-at-point 'sentence t)))))
       (let ((sentence (string-trim (replace-regexp-in-string
